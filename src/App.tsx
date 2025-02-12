@@ -3,7 +3,6 @@ import { supabase } from './lib/supabase';
 import { MediaLibrary } from './components/MediaLibrary';
 import { ShareDialog } from './components/ShareDialog';
 import { ScreenshotGallery } from './components/ScreenshotGallery';
-import { WelcomeDialog } from './components/WelcomeDialog';
 import { Session } from '@supabase/supabase-js';
 import { 
   Stamp as Steam, 
@@ -61,7 +60,6 @@ function App() {
   const [selectedScreenshot, setSelectedScreenshot] = useState<number>(0);
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [showMediaLibrary, setShowMediaLibrary] = useState(false);
-  const [showWelcomeDialog, setShowWelcomeDialog] = useState(true);
   const [hasInteracted, setHasInteracted] = useState(false);
   const [mediaTarget, setMediaTarget] = useState<'header' | 'screenshots' | null>(null);
   const [sharedUsername, setSharedUsername] = useState<string | null>(null);
@@ -118,7 +116,6 @@ function App() {
       const [, username, title] = match;
       setSharedUsername(username);
       setSharedTitle(decodeURIComponent(title));
-      setShowWelcomeDialog(false);
     }
   }, []);
 
@@ -126,7 +123,6 @@ function App() {
   useEffect(() => {
     if (sharedUsername && !session && !hasInteracted) {
       const handleFirstInteraction = () => {
-        setShowWelcomeDialog(true);
         setHasInteracted(true);
         document.removeEventListener('click', handleFirstInteraction);
       };
@@ -201,26 +197,68 @@ function App() {
   };
 
   const handleLogin = async () => {
-    const username = prompt('Choose a username:');
+    const username = prompt('Enter your username:');
     if (!username) return;
 
+    const password = prompt('Enter the password:');
+    if (!password) return;
+
     try {
-      const { data, error } = await supabase.auth.signUp({
-        email: `${Math.random().toString(36).substring(2)}@preview.com`,
-        password: Math.random().toString(36).substring(2),
-        options: {
-          data: { username }
-        }
+      console.log('Checking allowed users for:', username);
+      // First check if user is in allowed_users table
+      const { data: allowedUser, error: allowedError } = await supabase
+        .from('allowed_users')
+        .select('*')
+        .eq('username', username)
+        .eq('password_hash', password)
+        .single();
+
+      console.log('Full response:', { allowedUser, allowedError });
+
+      if (allowedError) {
+        console.error('Database error:', allowedError);
+        throw new Error(`Database error: ${allowedError.message}`);
+      }
+
+      if (!allowedUser) {
+        throw new Error('Invalid username or password');
+      }
+
+      // If user is allowed, proceed with authentication
+      const email = `${username.toLowerCase()}@steamstore.internal`;
+      console.log('Attempting authentication with email:', email);
+      
+      // Try to sign in first
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password
       });
 
-      if (error) throw error;
-      if (data.session) {
-        setSession(data.session);
-        setShowWelcomeDialog(false);
+      console.log('Sign in attempt result:', { signInData, signInError });
+
+      if (signInError) {
+        console.log('Sign in failed, attempting signup');
+        // If sign in fails, try to sign up
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { username }
+          }
+        });
+
+        console.log('Sign up attempt result:', { data, error });
+
+        if (error) throw error;
+        if (data.session) {
+          setSession(data.session);
+        }
+      } else if (signInData.session) {
+        setSession(signInData.session);
       }
     } catch (err) {
       console.error('Error during login:', err);
-      alert('Failed to sign in. Please try again.');
+      alert(err instanceof Error ? err.message : 'Invalid username or password. Please try again.');
     }
   };
 
@@ -235,7 +273,6 @@ function App() {
       if (defaultTemplate) {
         setCurrentSuggestion(defaultTemplate);
       }
-      setShowWelcomeDialog(true);
     } catch (err) {
       console.error('Error signing out:', err);
       alert('Failed to sign out. Please try again.');
@@ -443,6 +480,42 @@ function App() {
       alert('Failed to set default template. Please try again.');
     }
   };
+
+  // If not logged in, show only the login screen
+  if (!session) {
+    return (
+      <div className="min-h-screen bg-[#1b2838] text-white">
+        <nav className="bg-[#171a21] text-sm">
+          <div className="max-w-6xl mx-auto flex items-center justify-between px-4 py-1">
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-2 mr-2">
+                <Steam className="w-6 h-6 text-[#1b2838]" />
+                <span className="font-bold tracking-wide text-base bg-gradient-to-br from-[#c7d5e0] to-[#67c1f5] bg-clip-text text-transparent">
+                  STEAM
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={handleLogin}
+              className="bg-[#5c7e10] hover:bg-[#739c16] px-3 py-0.5 rounded text-xs"
+            >
+              Sign In
+            </button>
+          </div>
+        </nav>
+        <div className="max-w-md mx-auto mt-20 p-6 bg-[#202d39] rounded-lg">
+          <h2 className="text-xl font-bold mb-4">Welcome to Steam Store Simulator</h2>
+          <p className="text-gray-300 mb-6">Please sign in to access the application.</p>
+          <button
+            onClick={handleLogin}
+            className="w-full bg-[#5c7e10] hover:bg-[#739c16] text-white py-2 px-4 rounded flex items-center justify-center space-x-2"
+          >
+            <span>Sign In</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#1b2838] text-white">
@@ -957,13 +1030,6 @@ function App() {
             username={session?.user?.user_metadata?.username || ''}
             gameTitle={currentSuggestion.title}
             onClose={() => setShowShareDialog(false)}
-          />
-        )}
-        
-        {showWelcomeDialog && (
-          <WelcomeDialog
-            onClose={() => setShowWelcomeDialog(false)}
-            onLogin={handleLogin}
           />
         )}
       </main>
