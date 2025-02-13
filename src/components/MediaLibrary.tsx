@@ -27,39 +27,42 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
   const loadFiles = async () => {
     try {
       setError(null);
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user?.user_metadata?.username) {
-        throw new Error('Please sign in to access the media library');
-      }
-
-      // Create user folder if it doesn't exist
-      const folderPath = `${session.user.user_metadata.username}/`;
-      await supabase.storage.from('game_assets').list(folderPath).catch(() => {
-        // If folder doesn't exist, create it with a placeholder file
-        return supabase.storage
-          .from('game_assets')
-          .upload(folderPath + '.placeholder', new Blob(['']))
-          .then(() => supabase.storage.from('game_assets').remove([folderPath + '.placeholder']));
-      });
-
-      const { data, error: listError } = await supabase.storage
+      
+      // List all files in root directory
+      const { data, error } = await supabase.storage
         .from('game_assets')
-        .list(session.user.user_metadata.username);
+        .list('', {
+          limit: 100,
+          offset: 0,
+          sortBy: { column: 'name', order: 'asc' }
+        });
 
-      if (listError) throw listError;
+      if (error) {
+        console.error('Error listing files:', error);
+        setError('Failed to load media files');
+        return;
+      }
 
       if (!data) {
         setFiles([]);
         return;
       }
 
+      console.log('All files found:', data);
+
+      // Process all files
       const mediaFiles = await Promise.all(
         data
-          .filter(file => file.name.match(/\.(jpg|jpeg|png|gif|webp|mp4|webm)$/i))
+          .filter(file => {
+            // Only include actual files (not directories) that are media files
+            const isMedia = file.name.match(/\.(jpg|jpeg|png|gif|webp|mp4|webm)$/i);
+            console.log(`Checking if ${file.name} is media:`, !!isMedia);
+            return !file.metadata?.isDirectory && isMedia;
+          })
           .map(async file => {
             const { data: urlData } = supabase.storage
               .from('game_assets')
-              .getPublicUrl(`${session.user.user_metadata.username}/${file.name}`);
+              .getPublicUrl(file.name);
             
             const isVideo = file.name.match(/\.(mp4|webm)$/i);
             
@@ -71,6 +74,7 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
           })
       );
 
+      console.log('Final media files:', mediaFiles);
       setFiles(mediaFiles);
     } catch (err) {
       console.error('Error in loadFiles:', err);
@@ -87,11 +91,6 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
     try {
       setUploading(true);
       setError(null);
-
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user?.user_metadata?.username) {
-        throw new Error('Please sign in to upload files');
-      }
 
       const fileExt = file.name.split('.').pop()?.toLowerCase();
       if (!fileExt || !['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm'].includes(fileExt)) {
@@ -110,13 +109,14 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
         );
       }
 
-      // Add timestamp to prevent name collisions
-      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
-      const filePath = `${session.user.user_metadata.username}/${fileName}`;
+      // Add timestamp and random string to prevent name collisions
+      const timestamp = new Date().toISOString().replace(/[^0-9]/g, '');
+      const random = Math.random().toString(36).substring(2, 8);
+      const fileName = `${timestamp}-${random}.${fileExt}`;
 
       const { error: uploadError } = await supabase.storage
         .from('game_assets')
-        .upload(filePath, file, {
+        .upload(fileName, file, {
           cacheControl: '3600',
           upsert: false
         });
@@ -137,15 +137,9 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
       setDeleting(fileName);
       setError(null);
 
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user?.user_metadata?.username) {
-        throw new Error('Please sign in to delete files');
-      }
-
-      const filePath = `${session.user.user_metadata.username}/${fileName}`;
       const { error: deleteError } = await supabase.storage
         .from('game_assets')
-        .remove([filePath]);
+        .remove([fileName]);
 
       if (deleteError) {
         throw deleteError;
@@ -237,7 +231,7 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
                     <Image className="absolute top-2 right-2 w-5 h-5 text-white bg-black/50 p-1 rounded" />
                   </>
                 )}
-                <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-2 transition-opacity">
+                <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 bg-black/50 transition-opacity">
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

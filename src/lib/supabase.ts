@@ -7,6 +7,8 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error('Missing Supabase environment variables');
 }
 
+console.log('Initializing Supabase with URL:', supabaseUrl);
+
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     autoRefreshToken: true,
@@ -24,6 +26,18 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
     maxAge: 3600
   }
 });
+
+// Test database connection
+supabase
+  .from('allowed_users')
+  .select('count')
+  .then(({ data, error }) => {
+    if (error) {
+      console.error('❌ Supabase connection error:', error);
+    } else {
+      console.log('✅ Supabase connection successful:', data);
+    }
+  });
 
 // Debug logging for development
 if (import.meta.env.DEV) {
