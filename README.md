@@ -11,8 +11,10 @@ Design and preview Steam store pages for your game. Edit copy, manage media, and
 
 ## Team Login
 
-- **Usernames**: Sebastian, Bjorne, Pelle, Martin, Jacqueline, Hannes
-- **Password**: `bark` (for all users)
+- Enter your **@trollheimstudios.com** email address
+- Click the magic link sent to your email
+- No password needed - just click and you're in!
+- Only company email addresses are allowed
 
 ## Local Development
 

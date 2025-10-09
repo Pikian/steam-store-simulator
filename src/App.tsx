@@ -3,6 +3,7 @@ import { supabase } from './lib/supabase';
 import { MediaLibrary } from './components/MediaLibrary';
 import { ShareDialog } from './components/ShareDialog';
 import { ScreenshotGallery } from './components/ScreenshotGallery';
+import { LoginDialog } from './components/LoginDialog';
 import { Session } from '@supabase/supabase-js';
 import { 
   Stamp as Steam, 
@@ -23,7 +24,8 @@ import {
   Star,
   Trash2,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Image
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -45,14 +47,10 @@ interface Suggestion {
 const defaultSuggestionTemplate: Suggestion = {
   title: 'Your Game Title',
   short_description: 'A brief description of your game',
-  long_description: '# About This Game\n\nA brutal exploration and survival game for 1-10 players, set in a procedurally-generated purgatory inspired by viking culture. Battle, build, and conquer your way to a saga worthy of Odin\'s attention!\n\n## Key Features\n\n- **Massive Procedural World**: Explore a world rich with dangers and rewards\n- **Complex Building System**: Craft epic longhouses and mighty fortresses\n- **Intense Combat**: Wield mighty weapons and defeat legendary creatures\n- **Cooperative Play**: Adventure with friends in a shared world\n\n## Your Viking Journey\n\nYou are a fallen viking warrior. Build your strength in a forgotten realm, craft powerful weapons, and slay mighty beasts to prove yourself worthy of Valhalla.',
-  header_image: 'https://images.unsplash.com/photo-1500964757637-c85e8a162699',
-  screenshots: [
-    'https://images.unsplash.com/photo-1518709766631-a6a7f45921c3',
-    'https://images.unsplash.com/photo-1516541196182-6bdb0516ed27',
-    'https://images.unsplash.com/photo-1530071100468-90954e4921d5'
-  ],
-  tags: ['Open World Survival Craft', 'Survival', 'Online Co-Op', 'Building', 'Exploration'],
+  long_description: '# About This Game\n\nDescribe your game here. You can use markdown for formatting.\n\n## Key Features\n\n- Feature 1\n- Feature 2\n- Feature 3\n\n## Additional Info\n\nAdd more details about your game...',
+  header_image: '',
+  screenshots: [],
+  tags: ['Action', 'Adventure', 'Indie'],
   price: 19.99,
   username: ''
 };
@@ -74,6 +72,7 @@ function App() {
   const [defaultTemplate, setDefaultTemplate] = useState<Suggestion | null>(null);
   const [currentSuggestion, setCurrentSuggestion] = useState<Suggestion>(defaultSuggestionTemplate);
   const [slideDirection, setSlideDirection] = useState<'left' | 'right' | null>(null);
+  const [showLoginDialog, setShowLoginDialog] = useState(false);
 
   // Initialize session from Supabase
   useEffect(() => {
@@ -250,71 +249,30 @@ function App() {
     }
   };
 
-  const handleLogin = async () => {
-    const username = prompt('Enter your username:');
-    if (!username) return;
+  const handleLogin = async (email: string) => {
+    // Validate domain
+    if (!email.toLowerCase().endsWith('@trollheimstudios.com')) {
+      throw new Error('Only @trollheimstudios.com email addresses are allowed');
+    }
 
-    const password = prompt('Enter your password:');
-    if (!password) return;
+    // Extract username from email for display
+    const username = email.split('@')[0];
 
-    try {
-      // Check if user is in allowed_users list
-      const { data: allowedUser, error: checkError } = await supabase
-        .from('allowed_users')
-        .select('*')
-        .eq('username', username)
-        .eq('password_hash', password)
-        .maybeSingle();
-
-      if (checkError) {
-        console.error('Error checking allowed users:', checkError);
-        alert('Error checking credentials. Please try again.');
-        return;
-      }
-
-      if (!allowedUser) {
-        alert('Invalid username or password. Please contact an administrator.');
-        return;
-      }
-
-      // Create a temporary email for Supabase auth (since we're not using real emails)
-      const email = `${username.toLowerCase()}@steamstore.internal`;
-      
-      // Try to sign in first
-      let { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-        email,
-        password
-      });
-
-      // If sign in fails, try to sign up
-      if (signInError) {
-        console.log('Sign in failed, attempting sign up...');
-        const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              username: username
-            }
-          }
-        });
-
-        if (signUpError) {
-          console.error('Sign up error:', signUpError);
-          alert('Failed to create account. Please try again.');
-          return;
+    // Send magic link
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.toLowerCase(),
+      options: {
+        emailRedirectTo: window.location.origin,
+        data: {
+          username: username,
+          email: email.toLowerCase()
         }
-
-        signInData = signUpData;
       }
+    });
 
-      if (signInData.session) {
-        setSession(signInData.session);
-        alert(`Welcome, ${username}!`);
-      }
-    } catch (err) {
-      console.error('Login error:', err);
-      alert('Failed to sign in. Please try again.');
+    if (error) {
+      console.error('Magic link error:', error);
+      throw new Error(error.message || 'Failed to send login link. Please try again.');
     }
   };
 
@@ -328,6 +286,22 @@ function App() {
     } catch (error) {
       console.error('Error signing out:', error);
       alert('Failed to sign out. Please try again.');
+    }
+  };
+
+  const createNew = () => {
+    // Reset to a fresh template
+    setCurrentSuggestion({
+      ...defaultSuggestionTemplate,
+      username: session?.user?.user_metadata?.username || ''
+    });
+    setEditing(null);
+    setSelectedScreenshot(0);
+    // Clear shared state
+    if (sharedUsername) {
+      setSharedUsername(null);
+      setSharedTitle(null);
+      window.history.pushState({}, '', '/');
     }
   };
 
@@ -615,13 +589,19 @@ function App() {
               </div>
             </div>
             <button
-              onClick={handleLogin}
+              onClick={() => setShowLoginDialog(true)}
               className="bg-[#5c7e10] hover:bg-[#739c16] px-3 py-0.5 rounded text-xs"
             >
               Sign In
             </button>
           </div>
         </nav>
+        {showLoginDialog && (
+          <LoginDialog
+            onLogin={handleLogin}
+            onClose={() => setShowLoginDialog(false)}
+          />
+        )}
         <div className="max-w-4xl mx-auto mt-10 p-6">
           <div className="grid grid-cols-2 gap-6">
             {/* Left Column - Login */}
@@ -629,7 +609,7 @@ function App() {
               <h2 className="text-xl font-bold mb-4">Welcome to Steam Store Simulator</h2>
               <p className="text-gray-300 mb-6">Sign in to start creating and managing your game capsules.</p>
               <button
-                onClick={handleLogin}
+                onClick={() => setShowLoginDialog(true)}
                 className="w-full bg-[#5c7e10] hover:bg-[#739c16] text-white py-2 px-4 rounded flex items-center justify-center space-x-2"
               >
                 <span>Sign In</span>
@@ -717,7 +697,7 @@ function App() {
           <div className="flex items-center space-x-3">
             {!session ? (
               <button
-                onClick={handleLogin}
+                onClick={() => setShowLoginDialog(true)}
                 className="bg-[#5c7e10] hover:bg-[#739c16] px-3 py-0.5 rounded text-xs"
               >
                 Sign In
@@ -739,6 +719,12 @@ function App() {
             </button>
           </div>
         </div>
+        {showLoginDialog && (
+          <LoginDialog
+            onLogin={handleLogin}
+            onClose={() => setShowLoginDialog(false)}
+          />
+        )}
       </nav>
 
       {/* Store Navigation */}
@@ -982,12 +968,31 @@ function App() {
                 {/* Header Image */}
                 <div className="bg-[#202d39] p-3 rounded-lg mb-4">
                   <div className="relative">
-                    <img
-                      src={currentSuggestion.header_image}
-                      alt="Game header"
-                      className="w-full rounded"
-                    />
-                    {!sharedUsername && editing === 'header_image' && (
+                    {currentSuggestion.header_image ? (
+                      <img
+                        src={currentSuggestion.header_image}
+                        alt="Game header"
+                        className="w-full rounded"
+                      />
+                    ) : (
+                      <div className="w-full aspect-[460/215] bg-[#32404e] rounded flex flex-col items-center justify-center">
+                        <div className="text-center">
+                          <div className="bg-[#1b2838] w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-3">
+                            <Image className="w-8 h-8 text-gray-500" />
+                          </div>
+                          <p className="text-gray-400 text-sm mb-1">No header image</p>
+                          {!sharedUsername && (
+                            <button
+                              onClick={() => openMediaLibrary('header')}
+                              className="text-blue-300 hover:text-blue-400 text-xs"
+                            >
+                              Click to add header image
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {!sharedUsername && editing === 'header_image' && currentSuggestion.header_image && (
                       <button
                         onClick={() => openMediaLibrary('header')}
                         className="absolute bottom-3 left-3 bg-black/50 p-1.5 rounded cursor-pointer hover:bg-black/70"
@@ -1129,38 +1134,47 @@ function App() {
 
                 {/* Save and Share Buttons */}
                 {session && (
-                  <div className="flex space-x-2">
-                    {currentSuggestion.id && currentSuggestion.username === session.user.user_metadata.username ? (
-                      <>
+                  <div className="space-y-2">
+                    <div className="flex space-x-2">
+                      {currentSuggestion.id && currentSuggestion.username === session.user.user_metadata.username ? (
+                        <>
+                          <button
+                            onClick={saveSuggestion}
+                            className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                          >
+                            <Save className="w-4 h-4" />
+                            <span>Update</span>
+                          </button>
+                          <button
+                            onClick={saveAsNew}
+                            className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                          >
+                            <Plus className="w-4 h-4" />
+                            <span>Save as New</span>
+                          </button>
+                        </>
+                      ) : (
                         <button
                           onClick={saveSuggestion}
                           className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
                         >
                           <Save className="w-4 h-4" />
-                          <span>Update</span>
+                          <span>{sharedUsername ? 'Save Copy' : 'Save Suggestion'}</span>
                         </button>
-                        <button
-                          onClick={saveAsNew}
-                          className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
-                        >
-                          <Plus className="w-4 h-4" />
-                          <span>Save as New</span>
-                        </button>
-                      </>
-                    ) : (
+                      )}
                       <button
-                        onClick={saveSuggestion}
-                        className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                        onClick={() => setShowShareDialog(true)}
+                        className="bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
                       >
-                        <Save className="w-4 h-4" />
-                        <span>{sharedUsername ? 'Save Copy' : 'Save Suggestion'}</span>
+                        <Share2 className="w-4 h-4" />
                       </button>
-                    )}
+                    </div>
                     <button
-                      onClick={() => setShowShareDialog(true)}
-                      className="bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                      onClick={createNew}
+                      className="w-full bg-[#32404e] hover:bg-[#434e5b] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
                     >
-                      <Share2 className="w-4 h-4" />
+                      <Plus className="w-4 h-4" />
+                      <span>Create New Capsule</span>
                     </button>
                   </div>
                 )}

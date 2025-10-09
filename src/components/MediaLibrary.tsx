@@ -97,15 +97,15 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
         throw new Error('Invalid file type. Please upload an image or video file (jpg, png, gif, webp, mp4, webm).');
       }
 
-      // Check file size (50MB limit for videos, 5MB for images)
+      // Check file size (500MB limit for videos, 50MB for images)
       const isVideo = ['mp4', 'webm'].includes(fileExt);
-      const maxSize = isVideo ? 50 * 1024 * 1024 : 5 * 1024 * 1024;
+      const maxSize = isVideo ? 500 * 1024 * 1024 : 50 * 1024 * 1024;
       
       if (file.size > maxSize) {
         throw new Error(
           isVideo 
-            ? 'Video files must be smaller than 50MB' 
-            : 'Image files must be smaller than 5MB'
+            ? 'Video files must be smaller than 500MB' 
+            : 'Image files must be smaller than 50MB'
         );
       }
 
@@ -189,7 +189,7 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
                   <span className="text-xs text-gray-400">
                     Supported formats: JPG, PNG, GIF, WEBP, MP4, WEBM
                     <br />
-                    Max size: 50MB for videos, 5MB for images
+                    Max size: 500MB for videos, 50MB for images
                   </span>
                 </>
               )}
@@ -213,13 +213,13 @@ export function MediaLibrary({ onSelect, onClose }: MediaLibraryProps) {
                 className="aspect-video relative group cursor-pointer rounded overflow-hidden"
               >
                 {file.type === 'video' ? (
-                  <div className="w-full h-full bg-black flex items-center justify-center">
+                  <div className="w-full h-full bg-black flex items-center justify-center relative">
                     <video
                       src={file.url}
                       className="w-full h-full object-contain"
-                      controls
+                      preload="metadata"
                     />
-                    <Film className="absolute top-2 right-2 w-5 h-5 text-white bg-black/50 p-1 rounded" />
+                    <Film className="absolute top-2 right-2 w-5 h-5 text-white bg-black/50 p-1 rounded pointer-events-none" />
                   </div>
                 ) : (
                   <>
