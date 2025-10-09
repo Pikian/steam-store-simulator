@@ -75,19 +75,22 @@ function App() {
   const [currentSuggestion, setCurrentSuggestion] = useState<Suggestion>(defaultSuggestionTemplate);
   const [slideDirection, setSlideDirection] = useState<'left' | 'right' | null>(null);
 
-  // Initialize session
+  // Initialize session from Supabase
   useEffect(() => {
     const initSession = async () => {
       try {
-        // Check localStorage first
-        const savedSession = localStorage.getItem('userSession');
-        if (savedSession) {
-          const parsedSession = JSON.parse(savedSession);
-          setSession(parsedSession);
-        }
+        // Get current session from Supabase
+        const { data: { session } } = await supabase.auth.getSession();
+        setSession(session);
+        
+        // Listen for auth changes
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+          setSession(session);
+        });
+
+        return () => subscription.unsubscribe();
       } catch (error) {
-        console.error('Error restoring session:', error);
-        localStorage.removeItem('userSession'); // Clear invalid session data
+        console.error('Error initializing session:', error);
       } finally {
         setIsInitializing(false);
       }
@@ -248,35 +251,83 @@ function App() {
   };
 
   const handleLogin = async () => {
-    const name = prompt('Enter your name:');
-    if (!name) return;
+    const username = prompt('Enter your username:');
+    if (!username) return;
 
-    // Create a simple session object with all required properties
-    const newSession = {
-      access_token: 'dummy_token',
-      refresh_token: 'dummy_refresh',
-      expires_in: 3600,
-      token_type: 'bearer',
-      user: {
-        id: 'dummy_id',
-        app_metadata: {},
-        user_metadata: { username: name },
-        aud: 'authenticated',
-        created_at: new Date().toISOString()
+    const password = prompt('Enter your password:');
+    if (!password) return;
+
+    try {
+      // Check if user is in allowed_users list
+      const { data: allowedUser, error: checkError } = await supabase
+        .from('allowed_users')
+        .select('*')
+        .eq('username', username)
+        .eq('password_hash', password)
+        .maybeSingle();
+
+      if (checkError) {
+        console.error('Error checking allowed users:', checkError);
+        alert('Error checking credentials. Please try again.');
+        return;
       }
-    } as Session;
 
-    // Save to localStorage
-    localStorage.setItem('userSession', JSON.stringify(newSession));
-    setSession(newSession);
+      if (!allowedUser) {
+        alert('Invalid username or password. Please contact an administrator.');
+        return;
+      }
+
+      // Create a temporary email for Supabase auth (since we're not using real emails)
+      const email = `${username.toLowerCase()}@steamstore.internal`;
+      
+      // Try to sign in first
+      let { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
+
+      // If sign in fails, try to sign up
+      if (signInError) {
+        console.log('Sign in failed, attempting sign up...');
+        const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              username: username
+            }
+          }
+        });
+
+        if (signUpError) {
+          console.error('Sign up error:', signUpError);
+          alert('Failed to create account. Please try again.');
+          return;
+        }
+
+        signInData = signUpData;
+      }
+
+      if (signInData.session) {
+        setSession(signInData.session);
+        alert(`Welcome, ${username}!`);
+      }
+    } catch (err) {
+      console.error('Login error:', err);
+      alert('Failed to sign in. Please try again.');
+    }
   };
 
-  const handleSignOut = () => {
-    // Clear from localStorage
-    localStorage.removeItem('userSession');
-    setSession(null);
-    if (defaultTemplate) {
-      setCurrentSuggestion(defaultTemplate);
+  const handleSignOut = async () => {
+    try {
+      await supabase.auth.signOut();
+      setSession(null);
+      if (defaultTemplate) {
+        setCurrentSuggestion(defaultTemplate);
+      }
+    } catch (error) {
+      console.error('Error signing out:', error);
+      alert('Failed to sign out. Please try again.');
     }
   };
 

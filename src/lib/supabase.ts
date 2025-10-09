@@ -4,7 +4,7 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Missing Supabase environment variables');
+  throw new Error('Missing Supabase environment variables. Please check your .env file.');
 }
 
 console.log('Initializing Supabase with URL:', supabaseUrl);
@@ -13,48 +13,41 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: true
+    detectSessionInUrl: true,
+    storage: window.localStorage,
+    storageKey: 'steam-store-auth',
+    flowType: 'pkce'
   },
   db: {
     schema: 'public'
   },
-  // Add storage configuration
   storage: {
-    // Automatically retry failed uploads
     retryAttempts: 3,
-    // Add cache control for better performance
     maxAge: 3600
   }
 });
 
-// Test database connection
-supabase
-  .from('allowed_users')
-  .select('count')
-  .then(({ data, error }) => {
-    if (error) {
-      console.error('❌ Supabase connection error:', error);
-    } else {
-      console.log('✅ Supabase connection successful:', data);
-    }
-  });
-
 // Debug logging for development
 if (import.meta.env.DEV) {
+  // Test database connection
+  supabase
+    .from('suggestions')
+    .select('count')
+    .then(({ data, error }) => {
+      if (error) {
+        console.error('❌ Supabase connection error:', error);
+      } else {
+        console.log('✅ Supabase connection successful');
+      }
+    });
+
+  // Monitor auth state changes
   supabase.auth.onAuthStateChange((event, session) => {
-    if (event === 'SIGNED_IN') {
-      console.log('Signed in with user metadata:', session?.user?.user_metadata);
+    console.log('Auth event:', event);
+    if (event === 'SIGNED_IN' && session) {
+      console.log('Signed in:', session.user.user_metadata?.username);
+    } else if (event === 'SIGNED_OUT') {
+      console.log('Signed out');
     }
   });
-
-  // Debug storage configuration
-  supabase.storage.from('game_assets').list('').then(
-    ({ data, error }) => {
-      if (error) {
-        console.error('Storage configuration error:', error);
-      } else {
-        console.log('Storage bucket accessible:', data);
-      }
-    }
-  );
 }
