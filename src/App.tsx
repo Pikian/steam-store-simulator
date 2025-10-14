@@ -168,16 +168,21 @@ function App() {
         .from('suggestions')
         .select()
         .eq('is_default', true)
-        .single();
+        .maybeSingle();
 
-      if (error) throw error;
+      // If column doesn't exist or no default template, silently continue
+      if (error) {
+        console.log('No default template available:', error.message);
+        return;
+      }
       
       if (data) {
         setDefaultTemplate(data);
         setCurrentSuggestion(data);
       }
     } catch (err) {
-      console.error('Error loading default template:', err);
+      console.log('Could not load default template:', err);
+      // Continue without default template
     }
   };
 
