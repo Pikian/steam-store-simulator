@@ -1,7 +1,7 @@
 import React from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Trash2, Film, Image } from 'lucide-react';
+import { GripVertical, Trash2, Image } from 'lucide-react';
 
 interface SortableScreenshotProps {
   id: string;
@@ -47,19 +47,24 @@ export function SortableScreenshot({
       onClick={onSelect}
     >
       {isVideo ? (
-        <div className="w-full aspect-video bg-black">
+        <div className="w-full aspect-video bg-black relative rounded overflow-hidden">
           <video
             src={url}
             className="w-full h-full object-contain"
             muted
             playsInline
-            onMouseEnter={(e) => e.currentTarget.play()}
-            onMouseLeave={(e) => {
-              e.currentTarget.pause();
-              e.currentTarget.currentTime = 0;
-            }}
+            preload="metadata"
           />
-          <Film className="absolute top-2 right-2 w-4 h-4 text-white bg-black/50 p-1 rounded" />
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-black/20">
+            <svg
+              viewBox="0 0 48 48"
+              className="w-8 h-8 text-white/90 drop-shadow"
+              fill="currentColor"
+              aria-hidden
+            >
+              <path d="M8 5v38l35-19L8 5z" />
+            </svg>
+          </div>
         </div>
       ) : (
         <>

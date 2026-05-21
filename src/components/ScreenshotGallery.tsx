@@ -62,7 +62,7 @@ export function ScreenshotGallery({
   return (
     <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
       <SortableContext items={screenshots} strategy={rectSortingStrategy}>
-        <div className="grid grid-cols-5 gap-1.5">
+        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-1.5">
           {screenshots.map((screenshot, index) => (
             <SortableScreenshot
               key={screenshot}

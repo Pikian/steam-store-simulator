@@ -16,9 +16,11 @@ interface Comment {
 interface CommentsProps {
   suggestionId: string;
   currentUsername?: string;
+  /** Hide add/edit/delete (e.g. mobile display-only). */
+  readOnly?: boolean;
 }
 
-export function Comments({ suggestionId, currentUsername }: CommentsProps) {
+export function Comments({ suggestionId, currentUsername, readOnly = false }: CommentsProps) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState('');
   const [newRating, setNewRating] = useState(5);
@@ -31,6 +33,10 @@ export function Comments({ suggestionId, currentUsername }: CommentsProps) {
   useEffect(() => {
     loadComments();
   }, [suggestionId]);
+
+  useEffect(() => {
+    if (readOnly) setEditingComment(null);
+  }, [readOnly]);
 
   const loadComments = async () => {
     if (!suggestionId) {
@@ -240,7 +246,7 @@ export function Comments({ suggestionId, currentUsername }: CommentsProps) {
                   </div>
                   <StarRating rating={comment.rating} readOnly />
                 </div>
-                {currentUsername === comment.username && (
+                {!readOnly && currentUsername === comment.username && (
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => {
@@ -301,7 +307,7 @@ export function Comments({ suggestionId, currentUsername }: CommentsProps) {
       </div>
 
       {/* Add Comment */}
-      {currentUsername && (
+      {!readOnly && currentUsername && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-400">Rating:</span>
@@ -330,7 +336,7 @@ export function Comments({ suggestionId, currentUsername }: CommentsProps) {
         </div>
       )}
 
-      {!currentUsername && (
+      {!readOnly && !currentUsername && (
         <p className="text-sm text-gray-400 text-center">
           Please sign in to leave a comment
         </p>

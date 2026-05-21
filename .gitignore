@@ -32,3 +32,6 @@ dist-ssr
 # Vercel
 .vercel
 .env*.local
+
+# Portable FFmpeg (downloaded by scripts/mp4-to-steam-gif.ps1)
+tools/ffmpeg/

@@ -1,10 +1,32 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from './lib/supabase';
 import { MediaLibrary } from './components/MediaLibrary';
 import { ShareDialog } from './components/ShareDialog';
 import { ScreenshotGallery } from './components/ScreenshotGallery';
+import { ShowcaseVideo } from './components/ShowcaseVideo';
 import { LoginDialog } from './components/LoginDialog';
+import { AboutBlockEditor } from './components/AboutBlockEditor';
+import { AboutBlockPreview } from './components/AboutBlockPreview';
+import { CapsuleLibrary } from './components/CapsuleLibrary';
+import { Toast, ToastMessage } from './components/Toast';
 import { Session } from '@supabase/supabase-js';
+import type { Suggestion } from './types/suggestion';
+import {
+  createBlankCapsule,
+  forkCapsule,
+} from './types/suggestion';
+import { CapsuleToolbar } from './components/CapsuleToolbar';
+import {
+  normalizeAboutBlocks,
+  prepareSuggestionForSave,
+  normalizeSuggestionFromDb,
+} from './lib/aboutBlocks';
+import {
+  parseCapsuleRoute,
+  clearCapsuleRoute,
+  updateBrowserToShareUrl,
+  buildShareUrl,
+} from './lib/capsuleRoutes';
 import { 
   Stamp as Steam, 
   Tags, 
@@ -21,39 +43,26 @@ import {
   Share2,
   LogOut,
   AlertTriangle,
-  Star,
-  Trash2,
   ChevronLeft,
   ChevronRight,
   Image
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Comments } from './components/Comments';
+import { useIsMobile } from './hooks/useIsMobile';
 
-interface Suggestion {
-  id?: string;
-  title: string;
-  short_description: string;
-  long_description: string;
-  header_image: string;
-  screenshots: string[];
-  tags: string[];
-  price: number;
-  username: string;
-  is_default?: boolean;
+function snapshotSuggestion(s: Suggestion): string {
+  return JSON.stringify({
+    title: s.title,
+    short_description: s.short_description,
+    long_description: s.long_description,
+    about_blocks: s.about_blocks,
+    header_image: s.header_image,
+    screenshots: s.screenshots,
+    tags: s.tags,
+    price: s.price,
+  });
 }
-
-const defaultSuggestionTemplate: Suggestion = {
-  title: 'Your Game Title',
-  short_description: 'A brief description of your game',
-  long_description: '# About This Game\n\nDescribe your game here. You can use markdown for formatting.\n\n## Key Features\n\n- Feature 1\n- Feature 2\n- Feature 3\n\n## Additional Info\n\nAdd more details about your game...',
-  header_image: '',
-  screenshots: [],
-  tags: ['Action', 'Adventure', 'Indie'],
-  price: 19.99,
-  username: ''
-};
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -61,18 +70,88 @@ function App() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [selectedScreenshot, setSelectedScreenshot] = useState<number>(0);
-  const [showShareDialog, setShowShareDialog] = useState(false);
   const [showMediaLibrary, setShowMediaLibrary] = useState(false);
   const [hasInteracted, setHasInteracted] = useState(false);
-  const [mediaTarget, setMediaTarget] = useState<'header' | 'screenshots' | null>(null);
+  const [mediaTarget, setMediaTarget] = useState<'header' | 'screenshots' | 'about' | null>(null);
+  const [pendingAboutImageBlockId, setPendingAboutImageBlockId] = useState<string | null>(null);
+  const [sharedCapsuleId, setSharedCapsuleId] = useState<string | null>(null);
   const [sharedUsername, setSharedUsername] = useState<string | null>(null);
   const [sharedTitle, setSharedTitle] = useState<string | null>(null);
+  const [capsuleSearchQuery, setCapsuleSearchQuery] = useState('');
+  const [savedSnapshot, setSavedSnapshot] = useState('');
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [shareDialogCapsule, setShareDialogCapsule] = useState<Suggestion | null>(null);
+  const saveHandlerRef = useRef<() => Promise<void>>(async () => {});
   const [loadingError, setLoadingError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [defaultTemplate, setDefaultTemplate] = useState<Suggestion | null>(null);
-  const [currentSuggestion, setCurrentSuggestion] = useState<Suggestion>(defaultSuggestionTemplate);
+  const [currentSuggestion, setCurrentSuggestion] = useState<Suggestion>(() =>
+    createBlankCapsule('')
+  );
   const [slideDirection, setSlideDirection] = useState<'left' | 'right' | null>(null);
   const [showLoginDialog, setShowLoginDialog] = useState(false);
+
+  const editorUsername =
+    session?.user?.user_metadata?.username ??
+    session?.user?.email?.split('@')[0];
+
+  const ownsCurrentCapsule =
+    !currentSuggestion.id ||
+    !editorUsername ||
+    currentSuggestion.username === editorUsername;
+
+  const isViewingOthersCapsule = Boolean(
+    currentSuggestion.id &&
+      editorUsername &&
+      currentSuggestion.username &&
+      currentSuggestion.username !== editorUsername
+  );
+
+  /** Shared link preview — others' capsules, or legacy URL to someone else's draft */
+  const isSharedView = Boolean(
+    isViewingOthersCapsule ||
+      (sharedUsername &&
+        sharedTitle &&
+        sharedUsername !== editorUsername)
+  );
+
+  const isMobile = useIsMobile();
+  const canEdit = Boolean(session && ownsCurrentCapsule && !isMobile);
+  const isDirty = savedSnapshot !== '' && snapshotSuggestion(currentSuggestion) !== savedSnapshot;
+
+  useEffect(() => {
+    if (!isMobile) return;
+    setEditing(null);
+    setShowMediaLibrary(false);
+    setMediaTarget(null);
+    setPendingAboutImageBlockId(null);
+  }, [isMobile]);
+
+  const showToast = useCallback((message: string, type: ToastMessage['type'] = 'success') => {
+    const id = crypto.randomUUID();
+    setToasts((prev) => [...prev, { id, message, type }]);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const markClean = useCallback((s: Suggestion) => {
+    setSavedSnapshot(snapshotSuggestion(s));
+  }, []);
+
+  const confirmIfDirty = useCallback((): boolean => {
+    if (!isDirty) return true;
+    return window.confirm('You have unsaved changes. Discard them and continue?');
+  }, [isDirty]);
+
+  const clearSharedRouteState = () => {
+    setSharedCapsuleId(null);
+    setSharedUsername(null);
+    setSharedTitle(null);
+    clearCapsuleRoute();
+  };
 
   // Initialize session from Supabase
   useEffect(() => {
@@ -104,14 +183,16 @@ function App() {
       try {
         setLoadingError(null);
         
-        if (sharedUsername && sharedTitle) {
-          // Load shared capsule
+        if (sharedCapsuleId) {
+          await loadSharedCapsuleById();
+        } else if (sharedUsername && sharedTitle) {
           await loadSharedCapsule();
-        } else if (session?.user?.user_metadata?.username) {
-          // Load user's suggestions and default template
-          await loadSuggestions();
-          if (!defaultTemplate) {
-            await loadDefaultTemplate();
+        } else if (editorUsername) {
+          const username = editorUsername;
+          await loadDefaultTemplate();
+          const list = await loadSuggestions();
+          if (!isSharedView) {
+            applyInitialCapsule(list, username);
           }
         } else {
           // Reset to default template when not logged in and not viewing shared capsule
@@ -127,17 +208,19 @@ function App() {
     };
 
     loadData();
-  }, [session?.user?.user_metadata?.username, sharedUsername, sharedTitle, defaultTemplate]);
+  }, [editorUsername, sharedCapsuleId, sharedUsername, sharedTitle, defaultTemplate]);
 
-  // Check for shared capsule
+  // Parse share URL on load
   useEffect(() => {
-    const path = window.location.pathname;
-    const match = path.match(/^\/capsule\/([^/]+)\/(.+)$/);
-    
-    if (match) {
-      const [, username, title] = match;
-      setSharedUsername(username);
-      setSharedTitle(decodeURIComponent(title));
+    const route = parseCapsuleRoute(window.location.pathname);
+    if (route.type === 'id' && route.capsuleId) {
+      setSharedCapsuleId(route.capsuleId);
+      setSharedUsername(null);
+      setSharedTitle(null);
+    } else if (route.type === 'legacy' && route.username && route.title) {
+      setSharedCapsuleId(null);
+      setSharedUsername(route.username);
+      setSharedTitle(route.title);
     }
   }, []);
 
@@ -157,10 +240,16 @@ function App() {
     }
   }, [sharedUsername, session, hasInteracted]);
 
-  // Show nothing while checking session
-  if (isInitializing) {
-    return null;
-  }
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (session && !isMobile) void saveHandlerRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [session, isMobile]);
 
   const loadDefaultTemplate = async () => {
     try {
@@ -177,8 +266,8 @@ function App() {
       }
       
       if (data) {
-        setDefaultTemplate(data);
-        setCurrentSuggestion(data);
+        const normalized = normalizeSuggestionFromDb(data as Suggestion);
+        setDefaultTemplate(normalized);
       }
     } catch (err) {
       console.log('Could not load default template:', err);
@@ -186,43 +275,30 @@ function App() {
     }
   };
 
-  const loadSharedCapsule = async () => {
-    if (!sharedUsername || !sharedTitle) return;
+  const loadSharedCapsuleById = async () => {
+    if (!sharedCapsuleId) return;
 
     try {
       setLoadingError(null);
-      console.log('Loading shared capsule for:', { sharedUsername, sharedTitle });
-      
       const { data, error } = await supabase
         .from('suggestions')
         .select()
-        .eq('username', sharedUsername)
-        .eq('title', sharedTitle)
+        .eq('id', sharedCapsuleId)
         .maybeSingle();
 
-      if (error) {
-        console.error('Supabase error details:', {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code
-        });
-        throw error;
-      }
-      
+      if (error) throw error;
+
       if (data) {
-        console.log('Successfully loaded shared capsule:', data);
-        setCurrentSuggestion(data);
+        const normalized = normalizeSuggestionFromDb(data as Suggestion);
+        setCurrentSuggestion(normalized);
         setEditing(null);
-        
-        // If logged in, also load user's suggestions
+        markClean(normalized);
         if (session?.user?.user_metadata?.username) {
           await loadSuggestions();
         } else {
-          setSuggestions([]); // Clear suggestions when viewing shared capsule without login
+          setSuggestions([]);
         }
       } else {
-        console.log('No capsule found for:', { sharedUsername, sharedTitle });
         setLoadingError('This game capsule does not exist or has been removed.');
       }
     } catch (err) {
@@ -231,27 +307,75 @@ function App() {
     }
   };
 
-  const loadSuggestions = async () => {
+  const loadSharedCapsule = async () => {
+    if (!sharedUsername || !sharedTitle) return;
+
     try {
       setLoadingError(null);
-      console.log('Loading all suggestions');
+      const { data, error } = await supabase
+        .from('suggestions')
+        .select()
+        .eq('username', sharedUsername)
+        .eq('title', sharedTitle)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (data) {
+        const normalized = normalizeSuggestionFromDb(data as Suggestion);
+        setCurrentSuggestion(normalized);
+        setEditing(null);
+        markClean(normalized);
+        if (session?.user?.user_metadata?.username) {
+          await loadSuggestions();
+        } else {
+          setSuggestions([]);
+        }
+      } else {
+        setLoadingError('This game capsule does not exist or has been removed.');
+      }
+    } catch (err) {
+      console.error('Error loading shared capsule:', err);
+      setLoadingError('Failed to load the game capsule. Please try again later.');
+    }
+  };
+
+  const loadSuggestions = async (): Promise<Suggestion[]> => {
+    try {
+      setLoadingError(null);
 
       const { data, error } = await supabase
         .from('suggestions')
         .select()
-        .order('created_at', { ascending: false });
-      
-      if (error) {
-        console.error('Error loading suggestions:', error);
-        throw error;
-      }
+        .order('updated_at', { ascending: false });
 
-      console.log('Loaded suggestions:', data);
-      setSuggestions(data || []);
+      if (error) throw error;
+
+      const normalized = (data || []).map((row) => normalizeSuggestionFromDb(row as Suggestion));
+      setSuggestions(normalized);
+      return normalized;
     } catch (err) {
       console.error('Error loading suggestions:', err);
       setLoadingError('Failed to load suggestions. Please try again later.');
+      return [];
     }
+  };
+
+  /** On login: open your latest capsule, or a blank draft — never someone else's default. */
+  const applyInitialCapsule = (list: Suggestion[], username: string) => {
+    const mine = list.filter((s) => s.username === username);
+    if (mine.length > 0) {
+      setCurrentSuggestion(mine[0]);
+      markClean(mine[0]);
+    } else {
+      const blank = createBlankCapsule(username);
+      setCurrentSuggestion(blank);
+      setSavedSnapshot('');
+    }
+  };
+
+  const scrollToLibrary = () => {
+    document.getElementById('capsule-library')?.scrollIntoView({ behavior: 'smooth' });
   };
 
   const handleLogin = async (email: string) => {
@@ -285,159 +409,141 @@ function App() {
     try {
       await supabase.auth.signOut();
       setSession(null);
-      if (defaultTemplate) {
-        setCurrentSuggestion(defaultTemplate);
-      }
+      setCurrentSuggestion(createBlankCapsule(''));
+      setSavedSnapshot('');
     } catch (error) {
       console.error('Error signing out:', error);
-      alert('Failed to sign out. Please try again.');
+      showToast('Failed to sign out', 'error');
     }
   };
 
-  const createNew = () => {
-    // Reset to a fresh template
-    setCurrentSuggestion({
-      ...defaultSuggestionTemplate,
-      username: session?.user?.user_metadata?.username || ''
-    });
+  const startBlank = () => {
+    if (!confirmIfDirty()) return;
+    setCurrentSuggestion(createBlankCapsule(editorUsername || ''));
+    setSavedSnapshot('');
     setEditing(null);
     setSelectedScreenshot(0);
-    // Clear shared state
-    if (sharedUsername) {
-      setSharedUsername(null);
-      setSharedTitle(null);
-      window.history.pushState({}, '', '/');
-    }
+    if (isSharedView) clearSharedRouteState();
+    showToast('Blank capsule — save when ready');
   };
 
-  const saveSuggestion = async () => {
-    if (!session?.user?.user_metadata?.username) {
-      alert('Please sign in to save suggestions');
-      return;
+  const startFromCapsule = (source: Suggestion) => {
+    if (!confirmIfDirty()) return;
+    setCurrentSuggestion(forkCapsule(source, editorUsername || ''));
+    setSavedSnapshot('');
+    setEditing(null);
+    setSelectedScreenshot(0);
+    if (isSharedView) clearSharedRouteState();
+    showToast('Your draft — edit and save when ready');
+  };
+
+  const saveSuggestion = async (): Promise<Suggestion | null> => {
+    if (!editorUsername) {
+      showToast('Please sign in to save', 'error');
+      return null;
     }
 
     try {
-      // Validate required fields
-      if (!currentSuggestion.title) {
+      setIsSaving(true);
+      if (!currentSuggestion.title?.trim()) {
         throw new Error('Title is required');
       }
 
-      // Always save as new when viewing a shared capsule
-      if (sharedUsername && sharedUsername !== session.user.user_metadata.username) {
-        return saveAsNew();
+      if (!ownsCurrentCapsule) {
+        showToast('Start blank or start from this template to edit', 'error');
+        return null;
       }
 
-      // Create a new suggestion object without the id field
-      const { id, ...suggestionWithoutId } = currentSuggestion;
-      
-      const suggestionData = {
-        ...suggestionWithoutId,
-        username: session.user.user_metadata.username,
-        // Ensure all required fields have default values
-        short_description: currentSuggestion.short_description || '',
-        long_description: currentSuggestion.long_description || '',
-        header_image: currentSuggestion.header_image || '',
-        screenshots: currentSuggestion.screenshots || [],
-        tags: currentSuggestion.tags || [],
-        price: currentSuggestion.price || 0
-      };
+      const suggestionData = prepareSuggestionForSave({
+        ...currentSuggestion,
+        username: editorUsername!,
+      });
 
-      let result;
-      
-      // Only allow updating if it's the user's own suggestion
-      if (id && currentSuggestion.username === session.user.user_metadata.username) {
-        // Update existing suggestion
-        result = await supabase
-          .from('suggestions')
-          .update(suggestionData)
-          .eq('id', id)
-          .select();
-      } else {
-        // Insert new suggestion
-        result = await supabase
-          .from('suggestions')
-          .insert([suggestionData])
-          .select();
-      }
+      const id = currentSuggestion.id;
+      const isOwn = id && currentSuggestion.username === editorUsername;
 
-      if (result.error) {
-        console.error('Error details:', result.error);
-        throw result.error;
-      }
+      const result = isOwn
+        ? await supabase.from('suggestions').update(suggestionData).eq('id', id).select()
+        : await supabase.from('suggestions').insert([suggestionData]).select();
 
-      alert('Game capsule saved successfully!');
+      if (result.error) throw result.error;
+
       await loadSuggestions();
-      
-      // Update current suggestion with the saved data
-      if (result.data && result.data[0]) {
-        setCurrentSuggestion(result.data[0]);
-        // Clear shared state if this was a shared capsule
-        if (sharedUsername && sharedUsername !== session.user.user_metadata.username) {
-          setSharedUsername(null);
-          setSharedTitle(null);
-          window.history.pushState({}, '', '/');
+
+      if (result.data?.[0]) {
+        const saved = normalizeSuggestionFromDb(result.data[0] as Suggestion);
+        setCurrentSuggestion(saved);
+        markClean(saved);
+        if (saved.id) {
+          updateBrowserToShareUrl(saved.id);
         }
+        showToast('Capsule saved');
+        return saved;
       }
+      return null;
     } catch (err) {
       console.error('Error saving suggestion:', err);
-      alert(err instanceof Error ? err.message : 'Failed to save game capsule. Please try again.');
+      showToast(
+        err instanceof Error ? err.message : 'Failed to save game capsule',
+        'error'
+      );
+      return null;
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  const saveAsNew = async () => {
-    if (!session?.user?.user_metadata?.username) {
-      alert('Please sign in to save suggestions');
-      return;
+  const saveAsNew = async (): Promise<Suggestion | null> => {
+    if (!editorUsername) {
+      showToast('Please sign in to save', 'error');
+      return null;
     }
 
     try {
-      // Validate required fields
-      if (!currentSuggestion.title) {
+      setIsSaving(true);
+      if (!currentSuggestion.title?.trim()) {
         throw new Error('Title is required');
       }
 
-      // Create a new suggestion object without the id and is_default fields
-      const { id: _, is_default: __, ...suggestionWithoutId } = currentSuggestion;
-      
-      const suggestionData = {
-        ...suggestionWithoutId,
-        username: session.user.user_metadata.username,
-        // Ensure all required fields have default values
-        short_description: currentSuggestion.short_description || '',
-        long_description: currentSuggestion.long_description || '',
-        header_image: currentSuggestion.header_image || '',
-        screenshots: currentSuggestion.screenshots || [],
-        tags: currentSuggestion.tags || [],
-        price: currentSuggestion.price || 0
-      };
+      const base = prepareSuggestionForSave({
+        ...currentSuggestion,
+        title: currentSuggestion.title.match(/\(draft\)$/i)
+          ? currentSuggestion.title
+          : `${currentSuggestion.title.replace(/\s*\(draft\)\s*$/i, '').trim()} (draft)`,
+        username: editorUsername!,
+      });
 
-      // Insert as new suggestion
-      const result = await supabase
-        .from('suggestions')
-        .insert([suggestionData])
-        .select();
+      const result = await supabase.from('suggestions').insert([base]).select();
 
-      if (result.error) {
-        console.error('Error details:', result.error);
-        throw result.error;
-      }
+      if (result.error) throw result.error;
 
-      alert('Game capsule saved as new suggestion!');
       await loadSuggestions();
-      
-      // Update current suggestion with the saved data
-      if (result.data && result.data[0]) {
-        setCurrentSuggestion(result.data[0]);
+
+      if (result.data?.[0]) {
+        const saved = normalizeSuggestionFromDb(result.data[0] as Suggestion);
+        setCurrentSuggestion(saved);
+        markClean(saved);
+        clearSharedRouteState();
+        if (saved.id) updateBrowserToShareUrl(saved.id);
+        showToast('Saved as new version');
+        return saved;
       }
+      return null;
     } catch (err) {
       console.error('Error saving suggestion:', err);
-      alert(err instanceof Error ? err.message : 'Failed to save game capsule. Please try again.');
+      showToast(
+        err instanceof Error ? err.message : 'Failed to save game capsule',
+        'error'
+      );
+      return null;
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const deleteSuggestion = async (id: string) => {
     if (!session?.user?.user_metadata?.username) {
-      alert('Please sign in to delete suggestions');
+      showToast('Please sign in to delete', 'error');
       return;
     }
 
@@ -475,10 +581,10 @@ function App() {
         setCurrentSuggestion(defaultTemplate);
       }
 
-      alert('Suggestion deleted successfully!');
+      showToast('Capsule deleted');
     } catch (err) {
       console.error('Error in deletion process:', err);
-      alert('Failed to delete suggestion. Please try again.');
+      showToast('Failed to delete capsule', 'error');
       // Refresh suggestions list in case of error
       console.log('Reloading suggestions due to error...');
       await loadSuggestions();
@@ -489,27 +595,65 @@ function App() {
 
   const handleMediaSelect = (url: string) => {
     if (mediaTarget === 'header') {
-      setCurrentSuggestion({
-        ...currentSuggestion,
-        header_image: url
-      });
+      setCurrentSuggestion({ ...currentSuggestion, header_image: url });
     } else if (mediaTarget === 'screenshots') {
       setCurrentSuggestion({
         ...currentSuggestion,
-        screenshots: [...(currentSuggestion.screenshots || []), url]
+        screenshots: [...(currentSuggestion.screenshots || []), url],
       });
+    } else if (mediaTarget === 'about' && pendingAboutImageBlockId) {
+      const blocks = normalizeAboutBlocks(currentSuggestion);
+      setCurrentSuggestion({
+        ...currentSuggestion,
+        about_blocks: blocks.map((b) =>
+          b.id === pendingAboutImageBlockId && b.type === 'image'
+            ? { ...b, url }
+            : b
+        ),
+      });
+      setPendingAboutImageBlockId(null);
     }
     setShowMediaLibrary(false);
     setMediaTarget(null);
   };
 
-  const openMediaLibrary = (target: 'header' | 'screenshots') => {
+  const openMediaLibrary = (target: 'header' | 'screenshots' | 'about', aboutBlockId?: string) => {
+    if (isMobile) return;
     if (!session) {
-      alert('Please sign in to access the media library');
+      showToast('Sign in to use the media library', 'error');
       return;
     }
     setMediaTarget(target);
+    if (target === 'about' && aboutBlockId) setPendingAboutImageBlockId(aboutBlockId);
     setShowMediaLibrary(true);
+  };
+
+  const handleSaveAndCopyLink = async () => {
+    const saved = await saveSuggestion();
+    const id = saved?.id ?? currentSuggestion.id;
+    if (id) {
+      try {
+        await navigator.clipboard.writeText(buildShareUrl(id));
+        showToast('Saved — link copied to clipboard');
+      } catch {
+        showToast('Saved — copy the link from Share', 'success');
+      }
+    }
+  };
+
+  saveHandlerRef.current = saveSuggestion;
+
+  const duplicateCapsule = (source: Suggestion) => {
+    startFromCapsule(source);
+  };
+
+  const selectCapsule = (suggestion: Suggestion) => {
+    if (!confirmIfDirty()) return;
+    setCurrentSuggestion(suggestion);
+    markClean(suggestion);
+    setEditing(null);
+    setSelectedScreenshot(0);
+    if (isSharedView) clearSharedRouteState();
   };
 
   const markAsDefaultTemplate = async (suggestionId: string) => {
@@ -537,16 +681,17 @@ function App() {
 
       await loadSuggestions();
       await loadDefaultTemplate();
-      alert('Default template updated successfully!');
+      showToast('Default template updated');
     } catch (err) {
       console.error('Error setting default template:', err);
-      alert('Failed to set default template. Please try again.');
+      showToast('Failed to set default template', 'error');
     }
   };
 
   const navigateSuggestion = (direction: 'prev' | 'next') => {
     if (!suggestions.length) return;
-    
+    if (!confirmIfDirty()) return;
+
     const currentIndex = suggestions.findIndex(s => s.id === currentSuggestion.id);
     let newIndex;
     
@@ -565,22 +710,26 @@ function App() {
     
     const newSuggestion = suggestions[newIndex];
     setCurrentSuggestion(newSuggestion);
+    markClean(newSuggestion);
     setEditing(null);
     setSelectedScreenshot(0);
-    
-    // Clear shared state when navigating
-    if (sharedUsername) {
-      setSharedUsername(null);
-      setSharedTitle(null);
-      window.history.pushState({}, '', '/');
-    }
+
+    if (isSharedView) clearSharedRouteState();
 
     // Reset slide direction after animation
     setTimeout(() => setSlideDirection(null), 500);
   };
 
-  // If not logged in, show only the login screen
-  if (!session) {
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-[#1b2838] flex items-center justify-center text-gray-400">
+        Loading…
+      </div>
+    );
+  }
+
+  // Login required except when viewing a shared capsule link
+  if (!session && !isSharedView) {
     return (
       <div className="min-h-screen bg-[#1b2838] text-white">
         <nav className="bg-[#171a21] text-sm">
@@ -608,7 +757,7 @@ function App() {
           />
         )}
         <div className="max-w-4xl mx-auto mt-10 p-6">
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Left Column - Login */}
             <div className="bg-[#202d39] rounded-lg p-6">
               <h2 className="text-xl font-bold mb-4">Welcome to Steam Store Simulator</h2>
@@ -686,20 +835,22 @@ function App() {
     <div className="min-h-screen bg-[#1b2838] text-white">
       {/* Global Navigation */}
       <nav className="bg-[#171a21] text-sm">
-        <div className="max-w-6xl mx-auto flex items-center justify-between px-4 py-1">
-          <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2 mr-2">
+        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2 px-4 py-1">
+          <div className="flex items-center space-x-4 min-w-0">
+            <div className="flex items-center space-x-2 mr-2 shrink-0">
               <Steam className="w-6 h-6 text-[#1b2838]" />
               <span className="font-bold tracking-wide text-base bg-gradient-to-br from-[#c7d5e0] to-[#67c1f5] bg-clip-text text-transparent">
                 STEAM
               </span>
             </div>
-            <a href="#" className="text-gray-300 hover:text-white text-xs">STORE</a>
-            <a href="#" className="text-gray-300 hover:text-white text-xs">COMMUNITY</a>
-            <a href="#" className="text-gray-300 hover:text-white text-xs">ABOUT</a>
-            <a href="#" className="text-gray-300 hover:text-white text-xs">SUPPORT</a>
+            <div className="hidden sm:flex items-center space-x-4">
+              <a href="#" className="text-gray-300 hover:text-white text-xs">STORE</a>
+              <a href="#" className="text-gray-300 hover:text-white text-xs">COMMUNITY</a>
+              <a href="#" className="text-gray-300 hover:text-white text-xs">ABOUT</a>
+              <a href="#" className="text-gray-300 hover:text-white text-xs">SUPPORT</a>
+            </div>
           </div>
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-3 shrink-0">
             {!session ? (
               <button
                 onClick={() => setShowLoginDialog(true)}
@@ -735,64 +886,84 @@ function App() {
       {/* Store Navigation */}
       <div className="bg-gradient-to-b from-[#2a475e] to-[#1b2838] shadow-lg">
         <div className="max-w-6xl mx-auto px-4">
-          <div className="flex items-center space-x-4 py-1 text-xs">
-            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer">
+          <div className="flex items-center gap-3 py-1 text-xs overflow-x-auto">
+            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer shrink-0">
               <Home className="w-3 h-3" />
               <span>Your Store</span>
             </div>
-            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer">
+            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer shrink-0">
               <GamepadIcon className="w-3 h-3" />
               <span>New & Noteworthy</span>
             </div>
-            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer">
+            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer shrink-0">
               <ShoppingCart className="w-3 h-3" />
               <span>Categories</span>
             </div>
-            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer">
+            <div className="hidden md:flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer shrink-0">
               <Users className="w-3 h-3" />
               <span>Points Shop</span>
             </div>
-            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer">
+            <div className="hidden md:flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer shrink-0">
               <Settings className="w-3 h-3" />
               <span>News</span>
             </div>
-            <div className="flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer">
+            <div className="hidden lg:flex items-center space-x-1 text-gray-300 hover:text-white cursor-pointer shrink-0">
               <Download className="w-3 h-3" />
               <span>Labs</span>
             </div>
           </div>
 
-          {/* Search Bar */}
-          <div className="relative py-1">
-            <input
-              type="text"
-              placeholder="search the store"
-              className="w-80 bg-[#316282] text-white placeholder-gray-400 px-3 py-0.5 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-            <Search className="absolute right-2 top-1/2 transform -translate-y-1/2 w-3 h-3 text-gray-400" />
-          </div>
+          {/* Capsule search (desktop editor only) */}
+          {session && !isMobile && (
+            <div className="relative py-1 w-full max-w-sm">
+              <input
+                type="text"
+                value={capsuleSearchQuery}
+                onChange={(e) => setCapsuleSearchQuery(e.target.value)}
+                placeholder="Search your capsules…"
+                className="w-full bg-[#316282] text-white placeholder-gray-400 px-3 py-0.5 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <Search className="absolute right-2 top-1/2 transform -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+          )}
         </div>
       </div>
 
       {/* Breadcrumb */}
       <div className="bg-[#1b2838]">
         <div className="max-w-6xl mx-auto px-4 py-1">
-          <div className="flex items-center space-x-2 text-xs text-gray-400">
-            <a href="#" className="hover:text-blue-300">All Games</a>
-            <span>&gt;</span>
-            <a href="#" className="hover:text-blue-300">Action Games</a>
-            <span>&gt;</span>
-            <span className="text-white">{currentSuggestion.title}</span>
+          <div className="flex items-center space-x-2 text-xs text-gray-400 min-w-0 overflow-hidden">
+            <a href="#" className="hover:text-blue-300 shrink-0">All Games</a>
+            <span className="shrink-0">&gt;</span>
+            <a href="#" className="hover:text-blue-300 shrink-0 hidden sm:inline">Action Games</a>
+            <span className="shrink-0 hidden sm:inline">&gt;</span>
+            <span className="text-white truncate">{currentSuggestion.title}</span>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <main className="max-w-6xl mx-auto p-4 relative">
+      <main className="max-w-6xl mx-auto px-3 py-4 sm:px-4 relative">
         {loadingError && (
           <div className="bg-red-500/10 border border-red-500/50 text-red-400 px-4 py-3 rounded mb-4">
             {loadingError}
           </div>
+        )}
+
+        {isSharedView && !session && (
+          <div className="bg-[#67c1f5]/10 border border-[#67c1f5]/30 text-[#67c1f5] px-4 py-2 rounded mb-4 text-sm">
+            Shared preview — sign in to create or edit your own capsules.
+          </div>
+        )}
+
+        {session && !isMobile && (
+          <CapsuleToolbar
+            currentSuggestion={currentSuggestion}
+            ownsCurrentCapsule={ownsCurrentCapsule}
+            onStartBlank={startBlank}
+            onStartFromTemplate={startFromCapsule}
+            onBrowseLibrary={scrollToLibrary}
+          />
         )}
 
         {/* Navigation Arrows */}
@@ -800,14 +971,14 @@ function App() {
           <>
             <button
               onClick={() => navigateSuggestion('prev')}
-              className="fixed left-8 top-1/2 transform -translate-y-1/2 bg-[#202d39]/90 hover:bg-[#32404e] p-4 rounded-full transition-all opacity-40 hover:opacity-100 group z-50 shadow-lg active:scale-95"
+              className="hidden lg:flex fixed left-8 top-1/2 transform -translate-y-1/2 bg-[#202d39]/90 hover:bg-[#32404e] p-4 rounded-full transition-all opacity-40 hover:opacity-100 group z-50 shadow-lg active:scale-95"
               aria-label="Previous suggestion"
             >
               <ChevronLeft className="w-8 h-8 text-white group-hover:scale-110 transition-transform" />
             </button>
             <button
               onClick={() => navigateSuggestion('next')}
-              className="fixed right-8 top-1/2 transform -translate-y-1/2 bg-[#202d39]/90 hover:bg-[#32404e] p-4 rounded-full transition-all opacity-40 hover:opacity-100 group z-50 shadow-lg active:scale-95"
+              className="hidden lg:flex fixed right-8 top-1/2 transform -translate-y-1/2 bg-[#202d39]/90 hover:bg-[#32404e] p-4 rounded-full transition-all opacity-40 hover:opacity-100 group z-50 shadow-lg active:scale-95"
               aria-label="Next suggestion"
             >
               <ChevronRight className="w-8 h-8 text-white group-hover:scale-110 transition-transform" />
@@ -840,7 +1011,7 @@ function App() {
             {/* Game Title & Navigation */}
             <div className="bg-gradient-to-r from-[#1b2838] to-[#2a475e] p-3">
               <div className="max-w-6xl mx-auto">
-                {editing === 'title' ? (
+                {editing === 'title' && canEdit ? (
                   <input
                     type="text"
                     value={currentSuggestion.title}
@@ -848,13 +1019,13 @@ function App() {
                       ...currentSuggestion,
                       title: e.target.value
                     })}
-                    className="text-2xl font-bold bg-[#32404e] p-2 rounded w-full mb-1"
+                    className="text-xl sm:text-2xl font-bold bg-[#32404e] p-2 rounded w-full mb-1"
                   />
                 ) : (
                   <div className="flex items-center gap-2">
                     <h2 
-                      className={`text-2xl font-bold mb-1 ${session ? 'cursor-pointer hover:text-blue-300' : ''}`}
-                      onClick={() => session && setEditing('title')}
+                      className={`text-xl sm:text-2xl font-bold mb-1 ${canEdit ? 'cursor-pointer hover:text-blue-300' : ''}`}
+                      onClick={() => canEdit && setEditing('title')}
                     >
                       {currentSuggestion.title}
                     </h2>
@@ -869,20 +1040,17 @@ function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-12 gap-4 mt-3">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 mt-3">
               {/* Left Column - Media */}
-              <div className="col-span-8">
+              <div className="col-span-1 lg:col-span-8 order-2 lg:order-none">
                 {/* Main Media Showcase */}
                 <div className="bg-[#202d39] p-3 rounded-lg mb-4">
                   <div className="relative aspect-video mb-3">
                     {currentSuggestion.screenshots && currentSuggestion.screenshots.length > 0 ? (
                       currentSuggestion.screenshots[selectedScreenshot].match(/\.(mp4|webm)$/i) ? (
-                        <video
+                        <ShowcaseVideo
                           src={currentSuggestion.screenshots[selectedScreenshot]}
                           className="w-full h-full object-contain bg-black rounded"
-                          controls
-                          autoPlay
-                          playsInline
                         />
                       ) : (
                         <img
@@ -895,7 +1063,7 @@ function App() {
                       <div className="w-full h-full bg-[#32404e] rounded flex items-center justify-center">
                         <div className="text-center">
                           <p className="text-gray-400 text-sm mb-2">No screenshots or videos added yet</p>
-                          {!sharedUsername && (
+                          {canEdit && (
                             <button
                               onClick={() => openMediaLibrary('screenshots')}
                               className="text-blue-300 hover:text-blue-400 text-xs"
@@ -934,7 +1102,7 @@ function App() {
                     />
                   )}
 
-                  {session && (
+                  {canEdit && (
                     <button
                       onClick={() => setEditing(editing === 'screenshots' ? null : 'screenshots')}
                       className="text-xs text-blue-300 mt-2 hover:text-blue-400"
@@ -944,32 +1112,43 @@ function App() {
                   )}
                 </div>
 
-                {/* Long Description */}
+                {/* About This Game */}
                 <div className="bg-[#202d39] p-3 rounded-lg mb-4">
-                  <h3 className="font-bold mb-3 text-lg">ABOUT THIS GAME</h3>
-                  {editing === 'long_description' ? (
-                    <textarea
-                      value={currentSuggestion.long_description}
-                      onChange={(e) => setCurrentSuggestion({
-                        ...currentSuggestion,
-                        long_description: e.target.value
-                      })}
-                      className="w-full bg-[#32404e] p-2 rounded text-sm"
-                      rows={10}
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-bold text-lg">ABOUT THIS GAME</h3>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditing(editing === 'about' ? null : 'about')
+                        }
+                        className="text-xs text-blue-300 hover:text-blue-400"
+                      >
+                        {editing === 'about' ? 'Done editing' : 'Edit section'}
+                      </button>
+                    )}
+                  </div>
+                  {editing === 'about' && canEdit ? (
+                    <AboutBlockEditor
+                      blocks={normalizeAboutBlocks(currentSuggestion)}
+                      onChange={(blocks) =>
+                        setCurrentSuggestion({
+                          ...currentSuggestion,
+                          about_blocks: blocks,
+                        })
+                      }
+                      onPickImage={(blockId) => openMediaLibrary('about', blockId)}
                     />
                   ) : (
-                    <div 
-                      className={`prose prose-invert max-w-none ${session ? 'cursor-pointer hover:text-blue-300' : ''} prose-sm`}
-                      onClick={() => session && setEditing('long_description')}
-                    >
-                      <ReactMarkdown>{currentSuggestion.long_description}</ReactMarkdown>
-                    </div>
+                    <AboutBlockPreview
+                      blocks={normalizeAboutBlocks(currentSuggestion)}
+                    />
                   )}
                 </div>
               </div>
 
-              {/* Right Column - Purchase & Info */}
-              <div className="col-span-4">
+              {/* Right Column - Purchase & Info (first on mobile, like Steam sidebar above fold) */}
+              <div className="col-span-1 lg:col-span-4 order-1 lg:order-none">
                 {/* Header Image */}
                 <div className="bg-[#202d39] p-3 rounded-lg mb-4">
                   <div className="relative">
@@ -986,7 +1165,7 @@ function App() {
                             <Image className="w-8 h-8 text-gray-500" />
                           </div>
                           <p className="text-gray-400 text-sm mb-1">No header image</p>
-                          {!sharedUsername && (
+                          {canEdit && (
                             <button
                               onClick={() => openMediaLibrary('header')}
                               className="text-blue-300 hover:text-blue-400 text-xs"
@@ -997,7 +1176,7 @@ function App() {
                         </div>
                       </div>
                     )}
-                    {!sharedUsername && editing === 'header_image' && currentSuggestion.header_image && (
+                    {canEdit && editing === 'header_image' && currentSuggestion.header_image && (
                       <button
                         onClick={() => openMediaLibrary('header')}
                         className="absolute bottom-3 left-3 bg-black/50 p-1.5 rounded cursor-pointer hover:bg-black/70"
@@ -1006,7 +1185,7 @@ function App() {
                       </button>
                     )}
                   </div>
-                  {!sharedUsername && (
+                  {canEdit && (
                     <button
                       onClick={() => setEditing(editing === 'header_image' ? null : 'header_image')}
                       className="text-xs text-blue-300 mt-2 hover:text-blue-400"
@@ -1016,25 +1195,67 @@ function App() {
                   )}
                 </div>
 
-                {/* Brief Description */}
+                {/* Short description (under header on Steam) */}
                 <div className="bg-[#202d39] p-3 rounded-lg mb-4">
-                  {editing === 'short_description' ? (
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-bold text-sm text-gray-400 uppercase tracking-wide">
+                      Short description
+                    </h3>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditing(
+                            editing === 'short_description' ? null : 'short_description'
+                          )
+                        }
+                        className="text-xs text-blue-300 hover:text-blue-400"
+                      >
+                        {editing === 'short_description' ? 'Done' : 'Edit'}
+                      </button>
+                    )}
+                  </div>
+                  {editing === 'short_description' && canEdit ? (
                     <textarea
                       value={currentSuggestion.short_description}
-                      onChange={(e) => setCurrentSuggestion({
-                        ...currentSuggestion,
-                        short_description: e.target.value
-                      })}
-                      className="w-full bg-[#32404e] p-2 rounded text-sm"
-                      rows={2}
+                      onChange={(e) =>
+                        setCurrentSuggestion({
+                          ...currentSuggestion,
+                          short_description: e.target.value,
+                        })
+                      }
+                      className="w-full bg-[#32404e] p-2 rounded text-sm text-gray-200"
+                      rows={4}
+                      placeholder="One or two sentences under the header — what players see before scrolling to About This Game."
+                      autoFocus
                     />
                   ) : (
-                    <p 
-                      className={`text-gray-300 ${session ? 'cursor-pointer hover:text-blue-300' : ''} text-sm`}
-                      onClick={() => session && setEditing('short_description')}
+                    <div
+                      role={canEdit ? 'button' : undefined}
+                      tabIndex={canEdit ? 0 : undefined}
+                      onClick={() => canEdit && setEditing('short_description')}
+                      onKeyDown={(e) => {
+                        if (canEdit && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          setEditing('short_description');
+                        }
+                      }}
+                      className={`text-sm min-h-[3rem] rounded p-2 ${
+                        canEdit
+                          ? 'cursor-pointer hover:bg-[#32404e]/60 text-gray-300 hover:text-blue-300 border border-transparent hover:border-gray-600'
+                          : 'text-gray-300'
+                      }`}
                     >
-                      {currentSuggestion.short_description}
-                    </p>
+                      {currentSuggestion.short_description?.trim() ? (
+                        currentSuggestion.short_description
+                      ) : (
+                        <span className="text-gray-500 italic">
+                          {canEdit
+                            ? 'Click to add short copy under the header…'
+                            : 'No short description'}
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
 
@@ -1057,7 +1278,7 @@ function App() {
                 <div className="bg-[#202d39] p-3 rounded-lg mb-4">
                   <h3 className="font-bold mb-3 text-sm">Buy {currentSuggestion.title}</h3>
                   <div className="bg-[#000000] p-3 rounded">
-                    {editing === 'price' ? (
+                    {editing === 'price' && canEdit ? (
                       <input
                         type="number"
                         value={currentSuggestion.price}
@@ -1070,8 +1291,8 @@ function App() {
                       />
                     ) : (
                       <div
-                        className={`${session ? 'cursor-pointer hover:text-blue-300' : ''}`}
-                        onClick={() => session && setEditing('price')}
+                        className={`${canEdit ? 'cursor-pointer hover:text-blue-300' : ''}`}
+                        onClick={() => canEdit && setEditing('price')}
                       >
                         <div className="text-xs text-gray-400">Buy {currentSuggestion.title}</div>
                         <div className="text-xl font-bold">${currentSuggestion.price?.toFixed(2)} USD</div>
@@ -1096,10 +1317,10 @@ function App() {
                         className={`px-2 py-0.5 rounded text-xs ${
                           tag === 'Early Access'
                             ? 'bg-[#d2e885] text-[#4c6b22] font-medium'
-                            : `bg-[#32404e] ${session && editing === 'tags' ? 'hover:bg-[#434e5b] cursor-pointer' : ''}`
+                            : `bg-[#32404e] ${canEdit && editing === 'tags' ? 'hover:bg-[#434e5b] cursor-pointer' : ''}`
                         }`}
                         onClick={() => {
-                          if (session && editing === 'tags') {
+                          if (canEdit && editing === 'tags') {
                             setCurrentSuggestion({
                               ...currentSuggestion,
                               tags: currentSuggestion.tags?.filter((_, i) => i !== index)
@@ -1110,7 +1331,7 @@ function App() {
                         {tag}
                       </span>
                     ))}
-                    {session && editing === 'tags' && (
+                    {canEdit && editing === 'tags' && (
                       <button
                         onClick={() => {
                           const tag = prompt('Enter new tag:');
@@ -1127,7 +1348,7 @@ function App() {
                       </button>
                     )}
                   </div>
-                  {session && (
+                  {canEdit && (
                     <button
                       onClick={() => setEditing(editing === 'tags' ? null : 'tags')}
                       className="text-xs text-blue-300 mt-2 hover:text-blue-400"
@@ -1137,52 +1358,62 @@ function App() {
                   )}
                 </div>
 
-                {/* Save and Share Buttons */}
-                {session && (
+                {/* Save and Share — desktop editor only */}
+                {canEdit ? (
                   <div className="space-y-2">
-                    <div className="flex space-x-2">
-                      {currentSuggestion.id && currentSuggestion.username === session.user.user_metadata.username ? (
-                        <>
-                          <button
-                            onClick={saveSuggestion}
-                            className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
-                          >
-                            <Save className="w-4 h-4" />
-                            <span>Update</span>
-                          </button>
-                          <button
-                            onClick={saveAsNew}
-                            className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
-                          >
-                            <Plus className="w-4 h-4" />
-                            <span>Save as New</span>
-                          </button>
-                        </>
-                      ) : (
+                    {isDirty && (
+                      <p className="text-xs text-amber-400/90 text-center">Unsaved changes</p>
+                    )}
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void saveSuggestion()}
+                        disabled={isSaving}
+                        className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] disabled:opacity-50 px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                      >
+                        <Save className="w-4 h-4" />
+                        <span>Save</span>
+                      </button>
+                      {currentSuggestion.id && (
                         <button
-                          onClick={saveSuggestion}
-                          className="flex-1 bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                          type="button"
+                          onClick={() => void saveAsNew()}
+                          disabled={isSaving}
+                          className="flex-1 bg-[#32404e] hover:bg-[#434e5b] disabled:opacity-50 px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
                         >
-                          <Save className="w-4 h-4" />
-                          <span>{sharedUsername ? 'Save Copy' : 'Save Suggestion'}</span>
+                          <Plus className="w-4 h-4" />
+                          <span>Save new version</span>
                         </button>
                       )}
                       <button
-                        onClick={() => setShowShareDialog(true)}
-                        className="bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                        type="button"
+                        onClick={() => setShareDialogCapsule(currentSuggestion)}
+                        className="sm:w-auto w-full bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                        title="Share"
                       >
                         <Share2 className="w-4 h-4" />
                       </button>
                     </div>
+                  </div>
+                ) : session && !ownsCurrentCapsule && !isMobile ? (
+                  <p className="text-xs text-gray-400 text-center py-2">
+                    Use <span className="text-gray-300">Start from this template</span> above to
+                    edit a copy as your draft.
+                  </p>
+                ) : isSharedView && !isMobile ? (
+                  <div className="space-y-2">
+                    <p className="text-xs text-gray-400 text-center">
+                      Sign in to start blank or from this template.
+                    </p>
                     <button
-                      onClick={createNew}
-                      className="w-full bg-[#32404e] hover:bg-[#434e5b] px-4 py-1.5 rounded flex items-center justify-center space-x-2 text-sm"
+                      type="button"
+                      onClick={() => setShowLoginDialog(true)}
+                      className="w-full bg-[#5c7e10] hover:bg-[#739c16] px-4 py-1.5 rounded text-sm"
                     >
-                      <Plus className="w-4 h-4" />
-                      <span>Create New Capsule</span>
+                      Sign in to edit
                     </button>
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
 
@@ -1191,117 +1422,29 @@ function App() {
               <Comments
                 suggestionId={currentSuggestion.id || ''}
                 currentUsername={session?.user?.user_metadata?.username}
+                readOnly={isMobile}
               />
             </div>
           </motion.div>
         </AnimatePresence>
 
-        {/* Previous Suggestions Section */}
-        {suggestions.length > 0 && (
-          <div className="bg-[#202d39] rounded-lg p-4 mt-6">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-bold">All Game Capsules</h2>
-              <div className="flex items-center space-x-2 text-sm">
-                <span className="text-gray-400">
-                  {suggestions.length} capsule{suggestions.length !== 1 ? 's' : ''}
-                </span>
-              </div>
-            </div>
-            <div className="space-y-3">
-              {suggestions.map((suggestion) => (
-                <div
-                  key={suggestion.id}
-                  onClick={() => {
-                    setCurrentSuggestion(suggestion);
-                    setEditing(null);
-                    setSelectedScreenshot(0);
-                    // Clear shared state when selecting a suggestion
-                    if (sharedUsername) {
-                      setSharedUsername(null);
-                      setSharedTitle(null);
-                      window.history.pushState({}, '', '/');
-                    }
-                  }}
-                  className={`border border-gray-700 rounded p-3 hover:bg-[#32404e] cursor-pointer group ${
-                    currentSuggestion.id === suggestion.id ? 'bg-[#32404e]' : ''
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <h3 className="font-semibold text-lg">
-                          {suggestion.title}
-                        </h3>
-                        <div className="flex items-center gap-2">
-                          {suggestion.is_default && (
-                            <span className="text-xs bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded">
-                              Default Template
-                            </span>
-                          )}
-                          <span className="text-xs bg-[#32404e] px-2 py-0.5 rounded text-gray-400">
-                            by {suggestion.username}
-                          </span>
-                        </div>
-                      </div>
-                      <p className="text-gray-400 mt-1">{suggestion.short_description}</p>
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {suggestion.tags?.slice(0, 3).map((tag, index) => (
-                          <span
-                            key={index}
-                            className="px-2 py-0.5 rounded text-xs bg-[#32404e] text-gray-300"
-                          >
-                            {tag}
-                          </span>
-                        ))}
-                        {suggestion.tags?.length > 3 && (
-                          <span className="px-2 py-0.5 rounded text-xs bg-[#32404e] text-gray-300">
-                            +{suggestion.tags.length - 3} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      {session?.user?.user_metadata?.username === 'Pikian' && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            markAsDefaultTemplate(suggestion.id!);
-                          }}
-                          disabled={suggestion.is_default}
-                          className={`${
-                            suggestion.is_default
-                              ? 'text-blue-300 cursor-not-allowed'
-                              : 'text-gray-500 hover:text-blue-300 opacity-0 group-hover:opacity-100'
-                          } transition-opacity text-sm flex items-center space-x-1`}
-                        >
-                          <Star className={`w-4 h-4 ${suggestion.is_default ? 'fill-current' : ''}`} />
-                          <span>{suggestion.is_default ? 'Default Template' : 'Set as Default'}</span>
-                        </button>
-                      )}
-                      {(session?.user?.user_metadata?.username === suggestion.username || 
-                        session?.user?.user_metadata?.username === 'Pikian') && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteSuggestion(suggestion.id!);
-                          }}
-                          disabled={deleting === suggestion.id}
-                          className={`${
-                            deleting === suggestion.id 
-                              ? 'text-gray-500 cursor-not-allowed'
-                              : 'text-gray-500 hover:text-red-500 opacity-0 group-hover:opacity-100'
-                          } transition-opacity flex items-center space-x-1`}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          <span>{deleting === suggestion.id ? 'Deleting...' : 'Delete'}</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+        {session && !isMobile && (
+          <CapsuleLibrary
+            suggestions={suggestions}
+            currentId={currentSuggestion.id}
+            currentUsername={session.user.user_metadata.username}
+            searchQuery={capsuleSearchQuery}
+            onSearchChange={setCapsuleSearchQuery}
+            onSelect={selectCapsule}
+            onShare={(s) => setShareDialogCapsule(s)}
+            onDuplicate={duplicateCapsule}
+            onStartFrom={startFromCapsule}
+            onStartBlank={startBlank}
+            onDelete={deleteSuggestion}
+            onSetDefault={markAsDefaultTemplate}
+            deletingId={deleting}
+            isAdmin={session.user.user_metadata.username === 'Pikian'}
+          />
         )}
 
         {showMediaLibrary && (
@@ -1311,13 +1454,28 @@ function App() {
           />
         )}
         
-        {showShareDialog && (
+        {shareDialogCapsule && (
           <ShareDialog
-            username={session?.user?.user_metadata?.username || ''}
-            gameTitle={currentSuggestion.title}
-            onClose={() => setShowShareDialog(false)}
+            capsuleId={
+              (shareDialogCapsule ?? currentSuggestion).id
+            }
+            username={
+              (shareDialogCapsule ?? currentSuggestion).username ||
+              session?.user?.user_metadata?.username ||
+              ''
+            }
+            gameTitle={(shareDialogCapsule ?? currentSuggestion).title}
+            onClose={() => setShareDialogCapsule(null)}
+            onSaveAndCopy={
+              ownsCurrentCapsule
+                ? handleSaveAndCopyLink
+                : undefined
+            }
+            isSaving={isSaving}
           />
         )}
+
+        <Toast toasts={toasts} onDismiss={dismissToast} />
       </main>
     </div>
   );

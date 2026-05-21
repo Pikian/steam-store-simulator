@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
   title text NOT NULL DEFAULT '',
   short_description text NOT NULL DEFAULT '',
   long_description text NOT NULL DEFAULT '',
+  about_blocks jsonb NOT NULL DEFAULT '[]'::jsonb,
   header_image text NOT NULL DEFAULT '',
   screenshots text[] DEFAULT ARRAY[]::text[],
   tags text[] DEFAULT ARRAY[]::text[],
