@@ -22,10 +22,11 @@ import {
   normalizeSuggestionFromDb,
 } from './lib/aboutBlocks';
 import {
-  parseCapsuleRoute,
   clearCapsuleRoute,
   updateBrowserToShareUrl,
   buildShareUrl,
+  getShareRouteFromPath,
+  hasShareRoute,
 } from './lib/capsuleRoutes';
 import { 
   Stamp as Steam, 
@@ -65,6 +66,7 @@ function snapshotSuggestion(s: Suggestion): string {
 }
 
 function App() {
+  const initialShareRoute = getShareRouteFromPath();
   const [session, setSession] = useState<Session | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -74,9 +76,16 @@ function App() {
   const [hasInteracted, setHasInteracted] = useState(false);
   const [mediaTarget, setMediaTarget] = useState<'header' | 'screenshots' | 'about' | null>(null);
   const [pendingAboutImageBlockId, setPendingAboutImageBlockId] = useState<string | null>(null);
-  const [sharedCapsuleId, setSharedCapsuleId] = useState<string | null>(null);
-  const [sharedUsername, setSharedUsername] = useState<string | null>(null);
-  const [sharedTitle, setSharedTitle] = useState<string | null>(null);
+  const [sharedCapsuleId, setSharedCapsuleId] = useState<string | null>(
+    initialShareRoute.sharedCapsuleId
+  );
+  const [sharedUsername, setSharedUsername] = useState<string | null>(
+    initialShareRoute.sharedUsername
+  );
+  const [sharedTitle, setSharedTitle] = useState<string | null>(initialShareRoute.sharedTitle);
+  const [isLoadingSharedCapsule, setIsLoadingSharedCapsule] = useState(() =>
+    hasShareRoute(initialShareRoute)
+  );
   const [capsuleSearchQuery, setCapsuleSearchQuery] = useState('');
   const [savedSnapshot, setSavedSnapshot] = useState('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -108,12 +117,15 @@ function App() {
       currentSuggestion.username !== editorUsername
   );
 
-  /** Shared link preview — others' capsules, or legacy URL to someone else's draft */
+  const shareRouteActive = hasShareRoute({
+    sharedCapsuleId,
+    sharedUsername,
+    sharedTitle,
+  });
+
+  /** Read-only preview when viewing via share link or someone else's capsule */
   const isSharedView = Boolean(
-    isViewingOthersCapsule ||
-      (sharedUsername &&
-        sharedTitle &&
-        sharedUsername !== editorUsername)
+    (!session && shareRouteActive) || isViewingOthersCapsule
   );
 
   const isMobile = useIsMobile();
@@ -150,7 +162,16 @@ function App() {
     setSharedCapsuleId(null);
     setSharedUsername(null);
     setSharedTitle(null);
+    setIsLoadingSharedCapsule(false);
     clearCapsuleRoute();
+  };
+
+  const applyShareRouteFromPath = (pathname: string) => {
+    const route = getShareRouteFromPath(pathname);
+    setSharedCapsuleId(route.sharedCapsuleId);
+    setSharedUsername(route.sharedUsername);
+    setSharedTitle(route.sharedTitle);
+    setIsLoadingSharedCapsule(hasShareRoute(route));
   };
 
   // Initialize session from Supabase
@@ -210,23 +231,16 @@ function App() {
     loadData();
   }, [editorUsername, sharedCapsuleId, sharedUsername, sharedTitle, defaultTemplate]);
 
-  // Parse share URL on load
+  // Sync share route on browser back/forward
   useEffect(() => {
-    const route = parseCapsuleRoute(window.location.pathname);
-    if (route.type === 'id' && route.capsuleId) {
-      setSharedCapsuleId(route.capsuleId);
-      setSharedUsername(null);
-      setSharedTitle(null);
-    } else if (route.type === 'legacy' && route.username && route.title) {
-      setSharedCapsuleId(null);
-      setSharedUsername(route.username);
-      setSharedTitle(route.title);
-    }
+    const onPopState = () => applyShareRouteFromPath(window.location.pathname);
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   // Handle first interaction with shared capsule
   useEffect(() => {
-    if (sharedUsername && !session && !hasInteracted) {
+    if (shareRouteActive && !session && !hasInteracted) {
       const handleFirstInteraction = () => {
         setHasInteracted(true);
         document.removeEventListener('click', handleFirstInteraction);
@@ -238,7 +252,7 @@ function App() {
         document.removeEventListener('click', handleFirstInteraction);
       };
     }
-  }, [sharedUsername, session, hasInteracted]);
+  }, [shareRouteActive, session, hasInteracted]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -279,6 +293,7 @@ function App() {
     if (!sharedCapsuleId) return;
 
     try {
+      setIsLoadingSharedCapsule(true);
       setLoadingError(null);
       const { data, error } = await supabase
         .from('suggestions')
@@ -304,6 +319,8 @@ function App() {
     } catch (err) {
       console.error('Error loading shared capsule:', err);
       setLoadingError('Failed to load the game capsule. Please try again later.');
+    } finally {
+      setIsLoadingSharedCapsule(false);
     }
   };
 
@@ -311,6 +328,7 @@ function App() {
     if (!sharedUsername || !sharedTitle) return;
 
     try {
+      setIsLoadingSharedCapsule(true);
       setLoadingError(null);
       const { data, error } = await supabase
         .from('suggestions')
@@ -337,6 +355,8 @@ function App() {
     } catch (err) {
       console.error('Error loading shared capsule:', err);
       setLoadingError('Failed to load the game capsule. Please try again later.');
+    } finally {
+      setIsLoadingSharedCapsule(false);
     }
   };
 
@@ -423,7 +443,7 @@ function App() {
     setSavedSnapshot('');
     setEditing(null);
     setSelectedScreenshot(0);
-    if (isSharedView) clearSharedRouteState();
+    if (shareRouteActive) clearSharedRouteState();
     showToast('Blank capsule — save when ready');
   };
 
@@ -433,7 +453,7 @@ function App() {
     setSavedSnapshot('');
     setEditing(null);
     setSelectedScreenshot(0);
-    if (isSharedView) clearSharedRouteState();
+    if (shareRouteActive) clearSharedRouteState();
     showToast('Your draft — edit and save when ready');
   };
 
@@ -653,7 +673,7 @@ function App() {
     markClean(suggestion);
     setEditing(null);
     setSelectedScreenshot(0);
-    if (isSharedView) clearSharedRouteState();
+    if (shareRouteActive) clearSharedRouteState();
   };
 
   const markAsDefaultTemplate = async (suggestionId: string) => {
@@ -714,7 +734,7 @@ function App() {
     setEditing(null);
     setSelectedScreenshot(0);
 
-    if (isSharedView) clearSharedRouteState();
+    if (shareRouteActive) clearSharedRouteState();
 
     // Reset slide direction after animation
     setTimeout(() => setSlideDirection(null), 500);
@@ -729,7 +749,7 @@ function App() {
   }
 
   // Login required except when viewing a shared capsule link
-  if (!session && !isSharedView) {
+  if (!session && !shareRouteActive) {
     return (
       <div className="min-h-screen bg-[#1b2838] text-white">
         <nav className="bg-[#171a21] text-sm">
@@ -761,7 +781,10 @@ function App() {
             {/* Left Column - Login */}
             <div className="bg-[#202d39] rounded-lg p-6">
               <h2 className="text-xl font-bold mb-4">Welcome to Steam Store Simulator</h2>
-              <p className="text-gray-300 mb-6">Sign in to start creating and managing your game capsules.</p>
+              <p className="text-gray-300 mb-6">
+                Sign in to start creating and managing your game capsules. Have a share link? Open it
+                directly — no sign-in required.
+              </p>
               <button
                 onClick={() => setShowLoginDialog(true)}
                 className="w-full bg-[#5c7e10] hover:bg-[#739c16] text-white py-2 px-4 rounded flex items-center justify-center space-x-2"
@@ -950,10 +973,14 @@ function App() {
           </div>
         )}
 
-        {isSharedView && !session && (
+        {shareRouteActive && !session && (
           <div className="bg-[#67c1f5]/10 border border-[#67c1f5]/30 text-[#67c1f5] px-4 py-2 rounded mb-4 text-sm">
             Shared preview — sign in to create or edit your own capsules.
           </div>
+        )}
+
+        {isLoadingSharedCapsule && shareRouteActive && (
+          <div className="text-center text-gray-400 py-8">Loading shared capsule…</div>
         )}
 
         {session && !isMobile && (
@@ -986,6 +1013,7 @@ function App() {
           </>
         )}
 
+        {!isLoadingSharedCapsule && (
         <AnimatePresence mode="wait">
           <motion.div
             key={currentSuggestion.id || 'default'}
@@ -1400,7 +1428,7 @@ function App() {
                     Use <span className="text-gray-300">Start from this template</span> above to
                     edit a copy as your draft.
                   </p>
-                ) : isSharedView && !isMobile ? (
+                ) : shareRouteActive && !session && !isMobile ? (
                   <div className="space-y-2">
                     <p className="text-xs text-gray-400 text-center">
                       Sign in to start blank or from this template.
@@ -1427,6 +1455,7 @@ function App() {
             </div>
           </motion.div>
         </AnimatePresence>
+        )}
 
         {session && !isMobile && (
           <CapsuleLibrary

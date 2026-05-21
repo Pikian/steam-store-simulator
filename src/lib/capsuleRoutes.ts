@@ -5,6 +5,27 @@ export interface ParsedCapsuleRoute {
   title?: string;
 }
 
+export interface ShareRouteState {
+  sharedCapsuleId: string | null;
+  sharedUsername: string | null;
+  sharedTitle: string | null;
+}
+
+export function getShareRouteFromPath(pathname = window.location.pathname): ShareRouteState {
+  const route = parseCapsuleRoute(pathname);
+  if (route.type === 'id' && route.capsuleId) {
+    return { sharedCapsuleId: route.capsuleId, sharedUsername: null, sharedTitle: null };
+  }
+  if (route.type === 'legacy' && route.username && route.title) {
+    return { sharedCapsuleId: null, sharedUsername: route.username, sharedTitle: route.title };
+  }
+  return { sharedCapsuleId: null, sharedUsername: null, sharedTitle: null };
+}
+
+export function hasShareRoute(state: ShareRouteState): boolean {
+  return Boolean(state.sharedCapsuleId || (state.sharedUsername && state.sharedTitle));
+}
+
 export function parseCapsuleRoute(pathname: string): ParsedCapsuleRoute {
   const idMatch = pathname.match(/^\/capsule\/id\/([0-9a-f-]{36})$/i);
   if (idMatch) {
