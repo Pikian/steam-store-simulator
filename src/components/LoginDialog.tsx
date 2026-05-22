@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { X, Mail, Check } from 'lucide-react';
+import { allowedDomainsHint, isAllowedEmail, allowedDomainsErrorMessage } from '../lib/allowedEmailDomains';
 
 interface LoginDialogProps {
   onLogin: (email: string) => Promise<void>;
@@ -20,9 +21,8 @@ export function LoginDialog({ onLogin, onClose }: LoginDialogProps) {
       return;
     }
 
-    // Validate email domain
-    if (!email.toLowerCase().endsWith('@trollheimstudios.com')) {
-      setError('Only @trollheimstudios.com email addresses are allowed');
+    if (!isAllowedEmail(email)) {
+      setError(allowedDomainsErrorMessage());
       return;
     }
 
@@ -77,7 +77,7 @@ export function LoginDialog({ onLogin, onClose }: LoginDialogProps) {
               </div>
               <h2 className="text-2xl font-bold mb-2">Sign In</h2>
               <p className="text-gray-400 text-sm">
-                Enter your @trollheimstudios.com email to receive a login link
+                Enter your work email ({allowedDomainsHint()}) to receive a login link
               </p>
             </div>
 
@@ -92,7 +92,7 @@ export function LoginDialog({ onLogin, onClose }: LoginDialogProps) {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full bg-[#32404e] text-white px-4 py-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="your.name@trollheimstudios.com"
+                  placeholder="your.name@company.com"
                   disabled={loading}
                   autoFocus
                 />
@@ -114,7 +114,7 @@ export function LoginDialog({ onLogin, onClose }: LoginDialogProps) {
 
               <div className="text-xs text-gray-400 space-y-1">
                 <p>✓ No password needed</p>
-                <p>✓ Only @trollheimstudios.com emails</p>
+                <p>✓ Only {allowedDomainsHint()} emails</p>
                 <p>✓ Link expires in 1 hour</p>
               </div>
             </form>

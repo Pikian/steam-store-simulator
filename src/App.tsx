@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from './lib/supabase';
+import { isAllowedEmail, allowedDomainsErrorMessage } from './lib/allowedEmailDomains';
 import { MediaLibrary } from './components/MediaLibrary';
 import { ShareDialog } from './components/ShareDialog';
 import { ScreenshotGallery } from './components/ScreenshotGallery';
@@ -399,9 +400,8 @@ function App() {
   };
 
   const handleLogin = async (email: string) => {
-    // Validate domain
-    if (!email.toLowerCase().endsWith('@trollheimstudios.com')) {
-      throw new Error('Only @trollheimstudios.com email addresses are allowed');
+    if (!isAllowedEmail(email)) {
+      throw new Error(allowedDomainsErrorMessage());
     }
 
     // Extract username from email for display
